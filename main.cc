@@ -11,9 +11,22 @@
 
 #include <atomic>
 #include <chrono>
+#include <cstdlib>
 #include <iostream>
+#include <string>
 #include <thread>
 #include <vector>
+
+enum Mode { ZERO_COPY = 0, STANDARD_MODE = 1 };
+
+enum Type { TIME_BASED = 0, LOOP_BASED = 1 };
+
+struct Config {
+  Mode mode;
+  Type type;
+  int value;
+  int size;
+};
 
 int do_poll(int fd, int events) {
   struct pollfd pfd;
@@ -43,7 +56,8 @@ bool do_recv_completion(int fd) {
   msg.msg_controllen = sizeof(control);
   ret = recvmsg(fd, &msg, MSG_ERRQUEUE);
   if (ret == -1 && errno == EAGAIN) {
-    // std::cout << "recvmsg notification: EAGAIN" << std::endl;
+    std::cout << "recvmsg notification: EAGAIN, ret= " << ret << std::endl;
+    std::cout << errno << std::endl;
     return false;
   }
   if (ret == -1) {
@@ -94,6 +108,10 @@ int create_udp_socket(int port, bool enable_zerocopy = true) {
   addr.sin_port = htons(port);
 
   int64_t temp = 1L;
+  int tmp = 1 << 21;
+  if (setsockopt(fd, SOL_SOCKET, SO_SNDBUF, &tmp, sizeof(int)) < 0) {
+    throw std::runtime_error("setsockopt error");
+  }
   if (setsockopt(fd, SOL_SOCKET, SO_REUSEADDR, &temp, sizeof(int)) < 0) {
     throw std::runtime_error("setsockopt error");
   }
@@ -114,20 +132,26 @@ int create_udp_socket(int port, bool enable_zerocopy = true) {
   return fd;
 }
 
-void udp_send_test(bool enable_zerocopy = true) {
-  int fd = create_udp_socket(12340, enable_zerocopy);
+void udp_send_test(const Config &config) {
+  int fd = create_udp_socket(12340, config.mode == ZERO_COPY);
   auto start_time = std::chrono::duration_cast<std::chrono::milliseconds>(
                         std::chrono::system_clock::now().time_since_epoch())
                         .count();
+  auto end_time = start_time;
+  auto sz = config.size;
+
   int i = 0;
-  while (i < 100000) {
-    char buf[1024];
+  std::string buf(sz, 'a');
+
+  int flags = config.mode == ZERO_COPY ? MSG_ZEROCOPY : 0;
+
+  while (true) {
     struct sockaddr_in dst_addr;
     memset(&dst_addr, 0, sizeof(dst_addr));
     dst_addr.sin_family = AF_INET;
-    dst_addr.sin_addr.s_addr = inet_addr("10.53.1.65");
+    dst_addr.sin_addr.s_addr = inet_addr("127.0.0.1");
     dst_addr.sin_port = htons(12345);
-    int n = sendto(fd, buf, sizeof(buf), enable_zerocopy ? SO_ZEROCOPY : 0,
+    int n = sendto(fd, buf.c_str(), buf.size(), flags,
                    reinterpret_cast<const struct sockaddr *>(&dst_addr),
                    sizeof(dst_addr));
     if (n < 0) {
@@ -137,23 +161,123 @@ void udp_send_test(bool enable_zerocopy = true) {
     // creates skbuff fragments directly from these pages.On tx completion,it
     // notifies the socket owner that it is safe to modify memory by queuing a
     // completion notification onto the socket error queue.
-    if (enable_zerocopy && do_poll(fd, POLLOUT)) {
-      while (do_recv_completion(fd)) {
-        // fixme?
+    while (!do_poll(fd, POLLOUT)) {
+      if (config.mode == ZERO_COPY) {
+        while (do_recv_completion(fd)) {
+        }
       }
     }
+
     i++;
+
+    if (config.type == LOOP_BASED) {
+      if (i >= config.value) break;
+      continue;
+    }
+
+    auto now_time = std::chrono::duration_cast<std::chrono::milliseconds>(
+                        std::chrono::system_clock::now().time_since_epoch())
+                        .count();
+    if (now_time - start_time >= config.value * 1000) {
+      break;
+    }
   }
-  auto end_time = std::chrono::duration_cast<std::chrono::milliseconds>(
-                      std::chrono::system_clock::now().time_since_epoch())
-                      .count();
+
+  end_time = std::chrono::duration_cast<std::chrono::milliseconds>(
+                 std::chrono::system_clock::now().time_since_epoch())
+                 .count();
   std::cout << "[udp_send_test] enable_zerocopy "
-            << (enable_zerocopy ? "enable" : "disable") << "send "
-            << (end_time - start_time) << " ms" << std::endl;
+            << (config.mode == ZERO_COPY ? "enable" : "disable") << "send "
+            << (end_time - start_time) << " ms " << i << " times , buff size "
+            << sz << " bytes" << std::endl;
+}
+
+void usage() {
+  std::cout << "Usage: program -m <mode> -t <type> -v <value> -s <size>"
+            << std::endl;
+  std::cout << "Options:" << std::endl;
+  std::cout
+      << "  -m <mode>  : Run mode. 0 for zero-copy mode, 1 for standard mode."
+      << std::endl;
+  std::cout << "  -t <type>  : Run type. 0 for time-based run (in seconds), 1 "
+               "for loop-based run."
+            << std::endl;
+  std::cout << "  -v <value> : Run value. Time in seconds if type is 0, loop "
+               "count if type is 1."
+            << std::endl;
+  std::cout << "  -s <size>  : send buff size in bytes." << std::endl;
+}
+
+bool parse_arguments(int argc, const char *argv[], Config &config) {
+  if (argc < 9) {
+    usage();
+    return false;
+  }
+
+  for (int i = 1; i < argc; i++) {
+    std::string arg = argv[i];
+    if (arg == "-m") {
+      if (i + 1 < argc) {
+        int mode = std::atoi(argv[++i]);
+        if (mode == 0 || mode == 1) {
+          config.mode = static_cast<Mode>(mode);
+        } else {
+          std::cerr << "Invalid mode value. Please use 0 or 1." << std::endl;
+          return false;
+        }
+      } else {
+        std::cerr << "-m option requires a value." << std::endl;
+        usage();
+        return false;
+      }
+    } else if (arg == "-t") {
+      if (i + 1 < argc) {
+        int type = std::atoi(argv[++i]);
+        if (type == 0 || type == 1) {
+          config.type = static_cast<Type>(type);
+        } else {
+          std::cerr << "Invalid type value. Please use 0 or 1." << std::endl;
+          return false;
+        }
+      } else {
+        std::cerr << "-t option requires a value." << std::endl;
+        usage();
+        return false;
+      }
+    } else if (arg == "-v") {
+      if (i + 1 < argc) {
+        config.value = std::atoi(argv[++i]);
+      } else {
+        std::cerr << "-v option requires a value." << std::endl;
+        usage();
+        return false;
+      }
+    } else if (arg == "-s") {
+      if (i + 1 < argc) {
+        config.size = std::atoi(argv[++i]);
+      } else {
+        std::cerr << "-s option requires a value." << std::endl;
+        usage();
+        return false;
+      }
+    } else {
+      std::cerr << "Unknown option: " << arg << std::endl;
+      usage();
+      return false;
+    }
+  }
+
+  return true;
 }
 
 int main(int argc, const char **argv) {
-  udp_send_test(false);
-  udp_send_test(true);
+  Config config;
+
+  if (!parse_arguments(argc, argv, config)) {
+    return 1;
+  }
+
+  udp_send_test(config);
+
   return 0;
 }
