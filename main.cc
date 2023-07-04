@@ -26,6 +26,7 @@ struct Config {
   Type type;
   int value;
   int size;
+  std::string ip = "127.0.0.1";
 };
 
 int do_poll(int fd, int events) {
@@ -144,12 +145,12 @@ void udp_send_test(const Config &config) {
   std::string buf(sz, 'a');
 
   int flags = config.mode == ZERO_COPY ? MSG_ZEROCOPY : 0;
-
+  std::cout << "sending data to " << config.ip << std::endl;
   while (true) {
     struct sockaddr_in dst_addr;
     memset(&dst_addr, 0, sizeof(dst_addr));
     dst_addr.sin_family = AF_INET;
-    dst_addr.sin_addr.s_addr = inet_addr("127.0.0.1");
+    dst_addr.sin_addr.s_addr = inet_addr(config.ip.c_str());
     dst_addr.sin_port = htons(12345);
     int n = sendto(fd, buf.c_str(), buf.size(), flags,
                    reinterpret_cast<const struct sockaddr *>(&dst_addr),
@@ -206,6 +207,8 @@ void usage() {
                "count if type is 1."
             << std::endl;
   std::cout << "  -s <size>  : send buff size in bytes." << std::endl;
+  std::cout << "  -c <ip address>  : ip address of the remote peer."
+            << std::endl;
 }
 
 bool parse_arguments(int argc, const char *argv[], Config &config) {
@@ -257,6 +260,14 @@ bool parse_arguments(int argc, const char *argv[], Config &config) {
         config.size = std::atoi(argv[++i]);
       } else {
         std::cerr << "-s option requires a value." << std::endl;
+        usage();
+        return false;
+      }
+    } else if (arg == "-c") {
+      if (i + 1 < argc) {
+        config.ip = std::string(argv[++i]);
+      } else {
+        std::cerr << "-c option requires a ip address." << std::endl;
         usage();
         return false;
       }
