@@ -187,10 +187,10 @@ void udp_send_test(const Config &config) {
   end_time = std::chrono::duration_cast<std::chrono::milliseconds>(
                  std::chrono::system_clock::now().time_since_epoch())
                  .count();
-  std::cout << "[udp_send_test] enable_zerocopy "
-            << (config.mode == ZERO_COPY ? "enable" : "disable") << "send "
-            << (end_time - start_time) << " ms " << i << " times , buff size "
-            << sz << " bytes" << std::endl;
+  std::cout << "[udp_send_test] zero copy is "
+            << (config.mode == ZERO_COPY ? "enabled" : "disabled") << ", send "
+            << (end_time - start_time) << " ms " << i
+            << " times , with buff size " << sz << " bytes" << std::endl;
 }
 
 void usage() {
